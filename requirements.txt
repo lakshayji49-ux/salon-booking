@@ -1,8 +1,7 @@
-# salon booking requirements
 fastapi
 uvicorn
 supabase
 python-dotenv
 pydantic
-twilio
+httpx
 python-multipart
