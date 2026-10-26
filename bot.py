@@ -5,16 +5,13 @@ import os
 
 router = APIRouter()
 
-# Meta Cloud API credentials
-META_TOKEN = os.environ.get("META_ACCESS_TOKEN")
-META_PHONE_ID = os.environ.get("META_PHONE_NUMBER_ID")
-META_API_URL = f"https://graph.facebook.com/v18.0/{META_PHONE_ID}/messages"
-
-# Verify token for webhook verification
 VERIFY_TOKEN = "salon_booking_verify_123"
-
-# In-memory session store
 sessions = {}
+
+
+def get_meta_url():
+    phone_id = os.environ.get("META_PHONE_NUMBER_ID", "")
+    return f"https://graph.facebook.com/v18.0/{phone_id}/messages"
 
 
 def get_session(phone: str) -> dict:
@@ -70,9 +67,9 @@ def get_dates():
 
 
 async def send_whatsapp(to: str, text: str):
-    """Send a WhatsApp message via Meta Cloud API."""
+    token = os.environ.get("META_ACCESS_TOKEN", "")
     headers = {
-        "Authorization": f"Bearer {META_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
     payload = {
@@ -82,11 +79,9 @@ async def send_whatsapp(to: str, text: str):
         "text": {"body": text}
     }
     async with httpx.AsyncClient() as client:
-        response = await client.post(META_API_URL, json=payload, headers=headers)
-        return response.json()
+        await client.post(get_meta_url(), json=payload, headers=headers)
 
 
-# ── WEBHOOK VERIFICATION (GET) ──
 @router.get("/webhook")
 async def verify_webhook(request: Request):
     params = dict(request.query_params)
@@ -98,17 +93,14 @@ async def verify_webhook(request: Request):
     return Response(content="Forbidden", status_code=403)
 
 
-# ── INCOMING MESSAGES (POST) ──
 @router.post("/webhook")
 async def receive_message(request: Request):
-    data = await request.json()
-
     try:
-        entry = data["entry"][0]
+        body = await request.json()
+        entry = body["entry"][0]
         change = entry["changes"][0]
         value = change["value"]
 
-        # Only process actual messages
         if "messages" not in value:
             return {"status": "ok"}
 
@@ -116,9 +108,8 @@ async def receive_message(request: Request):
         phone = message["from"]
         msg_type = message.get("type")
 
-        # Only handle text messages
         if msg_type != "text":
-            await send_whatsapp(phone, "Please send a text message to book your appointment.")
+            await send_whatsapp(phone, "Please send a text message to book.")
             return {"status": "ok"}
 
         msg = message["text"]["body"].strip()
@@ -126,7 +117,6 @@ async def receive_message(request: Request):
         step = session["step"]
         data_s = session["data"]
 
-        # ── STEP 0: start ──
         if step == "start" or msg.lower() in ["hi", "hello", "hey", "start"]:
             session["step"] = "ask_name"
             session["data"] = {}
@@ -136,14 +126,11 @@ async def receive_message(request: Request):
                 "What is your name?"
             )
 
-        # ── STEP 1: got name ──
         elif step == "ask_name":
             data_s["customer_name"] = msg
             barbers = get_barbers()
             data_s["barbers"] = barbers
-            barber_list = "\n".join(
-                [f"{i+1}. {b['name']}" for i, b in enumerate(barbers)]
-            )
+            barber_list = "\n".join([f"{i+1}. {b['name']}" for i, b in enumerate(barbers)])
             session["step"] = "ask_barber"
             await send_whatsapp(phone,
                 f"Nice to meet you, *{msg}*! 😊\n\n"
@@ -151,7 +138,6 @@ async def receive_message(request: Request):
                 f"Reply with a number (1, 2, or 3)"
             )
 
-        # ── STEP 2: got barber ──
         elif step == "ask_barber":
             barbers = data_s.get("barbers", [])
             try:
@@ -175,11 +161,8 @@ async def receive_message(request: Request):
                     f"Reply with a number (1, 2, or 3)"
                 )
             except (ValueError, IndexError):
-                await send_whatsapp(phone,
-                    f"Please reply with a number between 1 and {len(barbers)}"
-                )
+                await send_whatsapp(phone, f"Please reply with a number between 1 and {len(barbers)}")
 
-        # ── STEP 3: got date ──
         elif step == "ask_date":
             dates = data_s.get("dates", [])
             try:
@@ -191,14 +174,10 @@ async def receive_message(request: Request):
                 slots = get_available_slots(data_s["barber_id"], date)
                 if not slots:
                     clear_session(phone)
-                    await send_whatsapp(phone,
-                        "Sorry, no slots available on that date.\n\nSend *hi* to start again."
-                    )
+                    await send_whatsapp(phone, "Sorry, no slots available. Send *hi* to start again.")
                 else:
                     data_s["slots"] = slots
-                    slot_list = "\n".join(
-                        [f"{i+1}. {s}" for i, s in enumerate(slots)]
-                    )
+                    slot_list = "\n".join([f"{i+1}. {s}" for i, s in enumerate(slots)])
                     from datetime import datetime
                     date_display = datetime.strptime(date, "%Y-%m-%d").strftime("%a, %d %b")
                     session["step"] = "ask_slot"
@@ -207,11 +186,8 @@ async def receive_message(request: Request):
                         f"{slot_list}\n\nReply with a number to book"
                     )
             except (ValueError, IndexError):
-                await send_whatsapp(phone,
-                    f"Please reply with a number between 1 and {len(dates)}"
-                )
+                await send_whatsapp(phone, f"Please reply with a number between 1 and {len(dates)}")
 
-        # ── STEP 4: got slot ──
         elif step == "ask_slot":
             slots = data_s.get("slots", [])
             try:
@@ -242,20 +218,15 @@ async def receive_message(request: Request):
                     f"Send *hi* to make another booking."
                 )
             except (ValueError, IndexError):
-                await send_whatsapp(phone,
-                    f"Please reply with a number between 1 and {len(slots)}"
-                )
+                await send_whatsapp(phone, f"Please reply with a number between 1 and {len(slots)}")
             except Exception:
                 clear_session(phone)
-                await send_whatsapp(phone,
-                    "Sorry, that slot was just taken.\nSend *hi* to pick another slot."
-                )
-
+                await send_whatsapp(phone, "Sorry, that slot was just taken. Send *hi* to try again.")
         else:
             clear_session(phone)
             await send_whatsapp(phone, "Send *hi* to book your appointment 💈")
 
-    except (KeyError, IndexError):
-        pass
+    except Exception as e:
+        print(f"Webhook error: {e}")
 
     return {"status": "ok"}
