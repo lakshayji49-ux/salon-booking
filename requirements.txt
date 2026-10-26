@@ -1,3 +1,4 @@
+# salon booking requirements
 fastapi
 uvicorn
 supabase
