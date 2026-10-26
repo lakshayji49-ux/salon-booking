@@ -1,12 +1,19 @@
-from fastapi import APIRouter, Form
-from twilio.twiml.messaging_response import MessagingResponse
+from fastapi import APIRouter, Request, Response
 from database import supabase
-import json
+import httpx
+import os
 
 router = APIRouter()
 
-# In-memory session store per phone number
-# Stores current step and collected data for each user
+# Meta Cloud API credentials
+META_TOKEN = os.environ.get("META_ACCESS_TOKEN")
+META_PHONE_ID = os.environ.get("META_PHONE_NUMBER_ID")
+META_API_URL = f"https://graph.facebook.com/v18.0/{META_PHONE_ID}/messages"
+
+# Verify token for webhook verification
+VERIFY_TOKEN = "salon_booking_verify_123"
+
+# In-memory session store
 sessions = {}
 
 
@@ -41,7 +48,6 @@ def get_available_slots(barber_id: str, date: str):
         .execute()
     )
     booked = {b["slot_time"] for b in bookings.data}
-
     slots = []
     current = datetime.strptime("09:00", "%H:%M")
     end = datetime.strptime("18:00", "%H:%M")
@@ -63,157 +69,193 @@ def get_dates():
     return dates
 
 
+async def send_whatsapp(to: str, text: str):
+    """Send a WhatsApp message via Meta Cloud API."""
+    headers = {
+        "Authorization": f"Bearer {META_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": text}
+    }
+    async with httpx.AsyncClient() as client:
+        response = await client.post(META_API_URL, json=payload, headers=headers)
+        return response.json()
+
+
+# ── WEBHOOK VERIFICATION (GET) ──
+@router.get("/webhook")
+async def verify_webhook(request: Request):
+    params = dict(request.query_params)
+    mode = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        return Response(content=challenge, media_type="text/plain")
+    return Response(content="Forbidden", status_code=403)
+
+
+# ── INCOMING MESSAGES (POST) ──
 @router.post("/webhook")
-async def whatsapp_webhook(
-    Body: str = Form(...),
-    From: str = Form(...)
-):
-    msg = Body.strip()
-    phone = From.strip()
-    session = get_session(phone)
-    step = session["step"]
-    data = session["data"]
+async def receive_message(request: Request):
+    data = await request.json()
 
-    reply = ""
+    try:
+        entry = data["entry"][0]
+        change = entry["changes"][0]
+        value = change["value"]
 
-    # ── STEP 0: Any message starts the flow ──
-    if step == "start":
-        reply = (
-            "👋 Namaste! Welcome to *Style Hub Salon* 💈\n\n"
-            "I can book your appointment in seconds.\n\n"
-            "What is your name?"
-        )
-        session["step"] = "ask_name"
+        # Only process actual messages
+        if "messages" not in value:
+            return {"status": "ok"}
 
-    # ── STEP 1: Got name, show barbers ──
-    elif step == "ask_name":
-        data["customer_name"] = msg
-        barbers = get_barbers()
-        data["barbers"] = barbers
-        barber_list = "\n".join(
-            [f"{i+1}. {b['name']}" for i, b in enumerate(barbers)]
-        )
-        reply = (
-            f"Nice to meet you, *{msg}*! 😊\n\n"
-            f"Please choose your barber:\n\n"
-            f"{barber_list}\n\n"
-            f"Reply with a number (1, 2, or 3)"
-        )
-        session["step"] = "ask_barber"
+        message = value["messages"][0]
+        phone = message["from"]
+        msg_type = message.get("type")
 
-    # ── STEP 2: Got barber, show dates ──
-    elif step == "ask_barber":
-        barbers = data.get("barbers", [])
-        try:
-            choice = int(msg) - 1
-            if choice < 0 or choice >= len(barbers):
-                raise ValueError
-            barber = barbers[choice]
-            data["barber_id"] = barber["id"]
-            data["barber_name"] = barber["name"]
+        # Only handle text messages
+        if msg_type != "text":
+            await send_whatsapp(phone, "Please send a text message to book your appointment.")
+            return {"status": "ok"}
 
-            dates = get_dates()
-            data["dates"] = dates
-            from datetime import datetime
-            date_list = "\n".join(
-                [f"{i+1}. {datetime.strptime(d, '%Y-%m-%d').strftime('%a, %d %b')}"
-                 for i, d in enumerate(dates)]
+        msg = message["text"]["body"].strip()
+        session = get_session(phone)
+        step = session["step"]
+        data_s = session["data"]
+
+        # ── STEP 0: start ──
+        if step == "start" or msg.lower() in ["hi", "hello", "hey", "start"]:
+            session["step"] = "ask_name"
+            session["data"] = {}
+            await send_whatsapp(phone,
+                "👋 Namaste! Welcome to *Style Hub Salon* 💈\n\n"
+                "I can book your appointment in seconds.\n\n"
+                "What is your name?"
             )
-            reply = (
-                f"Great choice! *{barber['name']}* is available 💈\n\n"
-                f"Which date works for you?\n\n"
-                f"{date_list}\n\n"
+
+        # ── STEP 1: got name ──
+        elif step == "ask_name":
+            data_s["customer_name"] = msg
+            barbers = get_barbers()
+            data_s["barbers"] = barbers
+            barber_list = "\n".join(
+                [f"{i+1}. {b['name']}" for i, b in enumerate(barbers)]
+            )
+            session["step"] = "ask_barber"
+            await send_whatsapp(phone,
+                f"Nice to meet you, *{msg}*! 😊\n\n"
+                f"Choose your barber:\n\n{barber_list}\n\n"
                 f"Reply with a number (1, 2, or 3)"
             )
-            session["step"] = "ask_date"
-        except (ValueError, IndexError):
-            reply = f"Please reply with a number between 1 and {len(barbers)}"
 
-    # ── STEP 3: Got date, show slots ──
-    elif step == "ask_date":
-        dates = data.get("dates", [])
-        try:
-            choice = int(msg) - 1
-            if choice < 0 or choice >= len(dates):
-                raise ValueError
-            date = dates[choice]
-            data["date"] = date
-
-            slots = get_available_slots(data["barber_id"], date)
-            if not slots:
-                reply = (
-                    f"Sorry, no slots available for {data['barber_name']} on that date.\n\n"
-                    f"Send *hi* to start again and pick another date."
-                )
-                clear_session(phone)
-            else:
-                data["slots"] = slots
-                slot_list = "\n".join(
-                    [f"{i+1}. {s}" for i, s in enumerate(slots)]
-                )
+        # ── STEP 2: got barber ──
+        elif step == "ask_barber":
+            barbers = data_s.get("barbers", [])
+            try:
+                choice = int(msg.strip()) - 1
+                if choice < 0 or choice >= len(barbers):
+                    raise ValueError
+                barber = barbers[choice]
+                data_s["barber_id"] = barber["id"]
+                data_s["barber_name"] = barber["name"]
+                dates = get_dates()
+                data_s["dates"] = dates
                 from datetime import datetime
-                date_display = datetime.strptime(date, "%Y-%m-%d").strftime("%a, %d %b")
-                reply = (
-                    f"Available slots for *{data['barber_name']}* on *{date_display}*:\n\n"
-                    f"{slot_list}\n\n"
-                    f"Reply with a number to book your slot"
+                date_list = "\n".join(
+                    [f"{i+1}. {datetime.strptime(d, '%Y-%m-%d').strftime('%a, %d %b')}"
+                     for i, d in enumerate(dates)]
                 )
-                session["step"] = "ask_slot"
-        except (ValueError, IndexError):
-            reply = f"Please reply with a number between 1 and {len(dates)}"
+                session["step"] = "ask_date"
+                await send_whatsapp(phone,
+                    f"Great choice! *{barber['name']}* 💈\n\n"
+                    f"Which date?\n\n{date_list}\n\n"
+                    f"Reply with a number (1, 2, or 3)"
+                )
+            except (ValueError, IndexError):
+                await send_whatsapp(phone,
+                    f"Please reply with a number between 1 and {len(barbers)}"
+                )
 
-    # ── STEP 4: Got slot, create booking ──
-    elif step == "ask_slot":
-        slots = data.get("slots", [])
-        try:
-            choice = int(msg) - 1
-            if choice < 0 or choice >= len(slots):
-                raise ValueError
-            slot = slots[choice]
+        # ── STEP 3: got date ──
+        elif step == "ask_date":
+            dates = data_s.get("dates", [])
+            try:
+                choice = int(msg.strip()) - 1
+                if choice < 0 or choice >= len(dates):
+                    raise ValueError
+                date = dates[choice]
+                data_s["date"] = date
+                slots = get_available_slots(data_s["barber_id"], date)
+                if not slots:
+                    clear_session(phone)
+                    await send_whatsapp(phone,
+                        "Sorry, no slots available on that date.\n\nSend *hi* to start again."
+                    )
+                else:
+                    data_s["slots"] = slots
+                    slot_list = "\n".join(
+                        [f"{i+1}. {s}" for i, s in enumerate(slots)]
+                    )
+                    from datetime import datetime
+                    date_display = datetime.strptime(date, "%Y-%m-%d").strftime("%a, %d %b")
+                    session["step"] = "ask_slot"
+                    await send_whatsapp(phone,
+                        f"Available slots for *{data_s['barber_name']}* on *{date_display}*:\n\n"
+                        f"{slot_list}\n\nReply with a number to book"
+                    )
+            except (ValueError, IndexError):
+                await send_whatsapp(phone,
+                    f"Please reply with a number between 1 and {len(dates)}"
+                )
 
-            # Create booking in database
-            result = supabase.table("bookings").insert({
-                "salon_id":       "11111111-1111-1111-1111-111111111111",
-                "barber_id":      data["barber_id"],
-                "customer_name":  data["customer_name"],
-                "customer_phone": phone,
-                "date":           data["date"],
-                "slot_time":      slot,
-                "status":         "confirmed"
-            }).execute()
+        # ── STEP 4: got slot ──
+        elif step == "ask_slot":
+            slots = data_s.get("slots", [])
+            try:
+                choice = int(msg.strip()) - 1
+                if choice < 0 or choice >= len(slots):
+                    raise ValueError
+                slot = slots[choice]
+                supabase.table("bookings").insert({
+                    "salon_id":       "11111111-1111-1111-1111-111111111111",
+                    "barber_id":      data_s["barber_id"],
+                    "customer_name":  data_s["customer_name"],
+                    "customer_phone": phone,
+                    "date":           data_s["date"],
+                    "slot_time":      slot,
+                    "status":         "confirmed"
+                }).execute()
+                from datetime import datetime
+                date_display = datetime.strptime(data_s["date"], "%Y-%m-%d").strftime("%A, %d %B")
+                clear_session(phone)
+                await send_whatsapp(phone,
+                    f"✅ *Booking Confirmed!*\n\n"
+                    f"📍 Style Hub Salon\n"
+                    f"💈 Barber: {data_s['barber_name']}\n"
+                    f"📅 {date_display}\n"
+                    f"⏰ {slot}\n"
+                    f"👤 {data_s['customer_name']}\n\n"
+                    f"You'll get a reminder 1 hour before. See you! 🙏\n\n"
+                    f"Send *hi* to make another booking."
+                )
+            except (ValueError, IndexError):
+                await send_whatsapp(phone,
+                    f"Please reply with a number between 1 and {len(slots)}"
+                )
+            except Exception:
+                clear_session(phone)
+                await send_whatsapp(phone,
+                    "Sorry, that slot was just taken.\nSend *hi* to pick another slot."
+                )
 
-            from datetime import datetime
-            date_display = datetime.strptime(
-                data["date"], "%Y-%m-%d"
-            ).strftime("%A, %d %B")
-
-            reply = (
-                f"✅ *Booking Confirmed!*\n\n"
-                f"📍 Style Hub Salon\n"
-                f"💈 Barber: {data['barber_name']}\n"
-                f"📅 Date: {date_display}\n"
-                f"⏰ Time: {slot}\n"
-                f"👤 Name: {data['customer_name']}\n\n"
-                f"You will receive a reminder 1 hour before.\n"
-                f"See you soon! 🙏\n\n"
-                f"Send *hi* to make another booking."
-            )
+        else:
             clear_session(phone)
+            await send_whatsapp(phone, "Send *hi* to book your appointment 💈")
 
-        except (ValueError, IndexError):
-            reply = f"Please reply with a number between 1 and {len(slots)}"
-        except Exception as e:
-            reply = (
-                "Sorry, this slot was just booked by someone else.\n"
-                "Send *hi* to start again and pick another slot."
-            )
-            clear_session(phone)
+    except (KeyError, IndexError):
+        pass
 
-    else:
-        clear_session(phone)
-        reply = "Send *hi* to start booking your appointment 💈"
-
-    # Build Twilio response
-    resp = MessagingResponse()
-    resp.message(reply)
-    return str(resp)
+    return {"status": "ok"}
