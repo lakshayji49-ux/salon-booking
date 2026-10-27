@@ -65,10 +65,6 @@ async def send_whatsapp(to: str, text: str):
     instance_id = os.environ.get("GREEN_API_INSTANCE_ID", "")
     api_token = os.environ.get("GREEN_API_TOKEN", "")
 
-    print(f"Sending to: {to}")
-    print(f"Instance ID: {instance_id}")
-    print(f"Token (first 10): {api_token[:10] if api_token else 'MISSING'}")
-
     if not to.endswith("@c.us"):
         chat_id = f"{to}@c.us"
     else:
@@ -77,14 +73,9 @@ async def send_whatsapp(to: str, text: str):
     url = f"https://api.green-api.com/waInstance{instance_id}/sendMessage/{api_token}"
     payload = {"chatId": chat_id, "message": text}
 
-    print(f"URL: {url[:80]}")
-    print(f"Payload: {payload}")
-
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.post(url, json=payload)
-        print(f"Send response status: {response.status_code}")
-        print(f"Send response body: {response.text[:200]}")
-        return response.json()
+        print(f"Send status: {response.status_code} — {response.text[:100]}")
 
 
 async def process_message(phone: str, msg: str):
@@ -92,29 +83,26 @@ async def process_message(phone: str, msg: str):
     step = session["step"]
     data_s = session["data"]
 
+    print(f"Step: {step}, Msg: {msg}, Data keys: {list(data_s.keys())}")
+
+    # ── STEP 0: start ──
     if step == "start" or msg.lower() in ["hi", "hello", "hey", "start"]:
-        session["step"] = "ask_name"
-        session["data"] = {}
+        # Always fetch fresh barbers at start
+        barbers = get_barbers()
+        print(f"Fetched {len(barbers)} barbers")
+        session["step"] = "ask_barber"
+        session["data"] = {"barbers": barbers}
+        barber_list = "\n".join([f"{i+1}. {b['name']}" for i, b in enumerate(barbers)])
         await send_whatsapp(phone,
             "👋 Namaste! Welcome to *Style Hub Salon* 💈\n\n"
-            "I can book your appointment in seconds.\n\n"
-            "What is your name?"
-        )
-
-    elif step == "ask_name":
-        data_s["customer_name"] = msg
-        barbers = get_barbers()
-        data_s["barbers"] = barbers
-        barber_list = "\n".join([f"{i+1}. {b['name']}" for i, b in enumerate(barbers)])
-        session["step"] = "ask_barber"
-        await send_whatsapp(phone,
-            f"Nice to meet you, *{msg}*! 😊\n\n"
             f"Choose your barber:\n\n{barber_list}\n\n"
-            f"Reply with a number (1, 2, or 3)"
+            "Reply with a number (1, 2, or 3)"
         )
 
+    # ── STEP 1: got barber ──
     elif step == "ask_barber":
         barbers = data_s.get("barbers", [])
+        print(f"Barbers in session: {len(barbers)}")
         try:
             choice = int(msg.strip()) - 1
             if choice < 0 or choice >= len(barbers):
@@ -136,8 +124,14 @@ async def process_message(phone: str, msg: str):
                 f"Reply with a number (1, 2, or 3)"
             )
         except (ValueError, IndexError):
-            await send_whatsapp(phone, f"Please reply with a number between 1 and {len(barbers)}")
+            barbers = get_barbers()
+            data_s["barbers"] = barbers
+            barber_list = "\n".join([f"{i+1}. {b['name']}" for i, b in enumerate(barbers)])
+            await send_whatsapp(phone,
+                f"Please reply with a number between 1 and {len(barbers)}\n\n{barber_list}"
+            )
 
+    # ── STEP 2: got date ──
     elif step == "ask_date":
         dates = data_s.get("dates", [])
         try:
@@ -161,8 +155,16 @@ async def process_message(phone: str, msg: str):
                     f"{slot_list}\n\nReply with a number to book"
                 )
         except (ValueError, IndexError):
-            await send_whatsapp(phone, f"Please reply with a number between 1 and {len(dates)}")
+            from datetime import datetime
+            date_list = "\n".join(
+                [f"{i+1}. {datetime.strptime(d, '%Y-%m-%d').strftime('%a, %d %b')}"
+                 for i, d in enumerate(dates)]
+            )
+            await send_whatsapp(phone,
+                f"Please reply with a number between 1 and {len(dates)}\n\n{date_list}"
+            )
 
+    # ── STEP 3: got slot ──
     elif step == "ask_slot":
         slots = data_s.get("slots", [])
         try:
@@ -173,7 +175,7 @@ async def process_message(phone: str, msg: str):
             supabase.table("bookings").insert({
                 "salon_id":       "11111111-1111-1111-1111-111111111111",
                 "barber_id":      data_s["barber_id"],
-                "customer_name":  data_s["customer_name"],
+                "customer_name":  data_s.get("customer_name", "Customer"),
                 "customer_phone": phone,
                 "date":           data_s["date"],
                 "slot_time":      slot,
@@ -187,17 +189,19 @@ async def process_message(phone: str, msg: str):
                 f"📍 Style Hub Salon\n"
                 f"💈 Barber: {data_s['barber_name']}\n"
                 f"📅 {date_display}\n"
-                f"⏰ {slot}\n"
-                f"👤 {data_s['customer_name']}\n\n"
+                f"⏰ {slot}\n\n"
                 f"You'll get a reminder 1 hour before. See you! 🙏\n\n"
                 f"Send *hi* to make another booking."
             )
         except (ValueError, IndexError):
-            await send_whatsapp(phone, f"Please reply with a number between 1 and {len(slots)}")
+            slot_list = "\n".join([f"{i+1}. {s}" for i, s in enumerate(slots)])
+            await send_whatsapp(phone,
+                f"Please reply with a number between 1 and {len(slots)}\n\n{slot_list}"
+            )
         except Exception as e:
             print(f"Booking error: {e}")
             clear_session(phone)
-            await send_whatsapp(phone, "Sorry, that slot was just taken. Send *hi* to try again.")
+            await send_whatsapp(phone, "Sorry, error occurred. Send *hi* to try again.")
     else:
         clear_session(phone)
         await send_whatsapp(phone, "Send *hi* to book your appointment 💈")
@@ -222,14 +226,11 @@ async def receive_message(request: Request):
         phone = sender_data.get("sender", "")
         msg_type = message_data.get("typeMessage", "")
 
-        print(f"Phone: {phone}, Type: {msg_type}")
-
         if msg_type != "textMessage":
             await send_whatsapp(phone, "Please send a text message.")
             return {"status": "ok"}
 
         msg = message_data.get("textMessageData", {}).get("textMessage", "").strip()
-        print(f"Message: {msg}")
 
         if msg and phone:
             await process_message(phone, msg)
