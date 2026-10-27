@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Request
 from database import supabase
 import httpx
 import os
@@ -7,12 +7,6 @@ import json
 router = APIRouter()
 
 sessions = {}
-
-
-def get_green_api_url(method: str) -> str:
-    instance_id = os.environ.get("GREEN_API_INSTANCE_ID", "")
-    api_token = os.environ.get("GREEN_API_TOKEN", "")
-    return f"https://api.green-api.com/waInstance{instance_id}/{method}/{api_token}"
 
 
 def get_session(phone: str) -> dict:
@@ -68,15 +62,29 @@ def get_dates():
 
 
 async def send_whatsapp(to: str, text: str):
+    instance_id = os.environ.get("GREEN_API_INSTANCE_ID", "")
+    api_token = os.environ.get("GREEN_API_TOKEN", "")
+
+    print(f"Sending to: {to}")
+    print(f"Instance ID: {instance_id}")
+    print(f"Token (first 10): {api_token[:10] if api_token else 'MISSING'}")
+
     if not to.endswith("@c.us"):
         chat_id = f"{to}@c.us"
     else:
         chat_id = to
 
-    url = get_green_api_url("sendMessage")
+    url = f"https://api.green-api.com/waInstance{instance_id}/sendMessage/{api_token}"
     payload = {"chatId": chat_id, "message": text}
-    async with httpx.AsyncClient() as client:
-        await client.post(url, json=payload)
+
+    print(f"URL: {url[:80]}")
+    print(f"Payload: {payload}")
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(url, json=payload)
+        print(f"Send response status: {response.status_code}")
+        print(f"Send response body: {response.text[:200]}")
+        return response.json()
 
 
 async def process_message(phone: str, msg: str):
@@ -186,7 +194,8 @@ async def process_message(phone: str, msg: str):
             )
         except (ValueError, IndexError):
             await send_whatsapp(phone, f"Please reply with a number between 1 and {len(slots)}")
-        except Exception:
+        except Exception as e:
+            print(f"Booking error: {e}")
             clear_session(phone)
             await send_whatsapp(phone, "Sorry, that slot was just taken. Send *hi* to try again.")
     else:
@@ -197,18 +206,12 @@ async def process_message(phone: str, msg: str):
 @router.post("/webhook")
 async def receive_message(request: Request):
     try:
-        # Read raw body first
         raw_body = await request.body()
-        print(f"Raw webhook body: {raw_body[:500]}")
-
         if not raw_body:
             return {"status": "ok"}
 
         body = json.loads(raw_body)
-        print(f"Parsed webhook: {json.dumps(body)[:500]}")
-
         type_webhook = body.get("typeWebhook", "")
-        print(f"Webhook type: {type_webhook}")
 
         if type_webhook != "incomingMessageReceived":
             return {"status": "ok"}
@@ -222,7 +225,7 @@ async def receive_message(request: Request):
         print(f"Phone: {phone}, Type: {msg_type}")
 
         if msg_type != "textMessage":
-            await send_whatsapp(phone, "Please send a text message to book.")
+            await send_whatsapp(phone, "Please send a text message.")
             return {"status": "ok"}
 
         msg = message_data.get("textMessageData", {}).get("textMessage", "").strip()
@@ -231,8 +234,6 @@ async def receive_message(request: Request):
         if msg and phone:
             await process_message(phone, msg)
 
-    except json.JSONDecodeError as e:
-        print(f"JSON decode error: {e}")
     except Exception as e:
         print(f"Webhook error: {e}")
         import traceback
