@@ -1,17 +1,17 @@
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Request
 from database import supabase
 import httpx
 import os
 
 router = APIRouter()
 
-VERIFY_TOKEN = "salon_booking_verify_123"
 sessions = {}
 
 
-def get_meta_url():
-    phone_id = os.environ.get("META_PHONE_NUMBER_ID", "")
-    return f"https://graph.facebook.com/v18.0/{phone_id}/messages"
+def get_green_api_url(method: str) -> str:
+    instance_id = os.environ.get("GREEN_API_INSTANCE_ID", "")
+    api_token = os.environ.get("GREEN_API_TOKEN", "")
+    return f"https://api.green-api.com/waInstance{instance_id}/{method}/{api_token}"
 
 
 def get_session(phone: str) -> dict:
@@ -67,56 +67,55 @@ def get_dates():
 
 
 async def send_whatsapp(to: str, text: str):
-    token = os.environ.get("META_ACCESS_TOKEN", "")
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
+    # Green API expects number in format 919XXXXXXXXX@c.us
+    if not to.endswith("@c.us"):
+        chat_id = f"{to}@c.us"
+    else:
+        chat_id = to
+
+    url = get_green_api_url("sendMessage")
     payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"body": text}
+        "chatId": chat_id,
+        "message": text
     }
     async with httpx.AsyncClient() as client:
-        await client.post(get_meta_url(), json=payload, headers=headers)
-
-
-@router.get("/webhook")
-async def verify_webhook(request: Request):
-    params = dict(request.query_params)
-    mode = params.get("hub.mode")
-    token = params.get("hub.verify_token")
-    challenge = params.get("hub.challenge")
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return Response(content=challenge, media_type="text/plain")
-    return Response(content="Forbidden", status_code=403)
+        response = await client.post(url, json=payload)
+        return response.json()
 
 
 @router.post("/webhook")
 async def receive_message(request: Request):
     try:
         body = await request.json()
-        entry = body["entry"][0]
-        change = entry["changes"][0]
-        value = change["value"]
 
-        if "messages" not in value:
+        # Green API webhook format
+        type_webhook = body.get("typeWebhook")
+
+        # Only process incoming messages
+        if type_webhook != "incomingMessageReceived":
             return {"status": "ok"}
 
-        message = value["messages"][0]
-        phone = message["from"]
-        msg_type = message.get("type")
+        sender_data = body.get("senderData", {})
+        message_data = body.get("messageData", {})
 
-        if msg_type != "text":
-            await send_whatsapp(phone, "Please send a text message to book.")
+        phone = sender_data.get("sender", "")  # format: 919XXXXXXXXX@c.us
+        msg_type = message_data.get("typeMessage", "")
+
+        # Only handle text messages
+        if msg_type != "textMessage":
+            await send_whatsapp(phone, "Please send a text message to book your appointment.")
             return {"status": "ok"}
 
-        msg = message["text"]["body"].strip()
+        msg = message_data.get("textMessageData", {}).get("textMessage", "").strip()
+
+        if not msg or not phone:
+            return {"status": "ok"}
+
         session = get_session(phone)
         step = session["step"]
         data_s = session["data"]
 
+        # ── STEP 0: start ──
         if step == "start" or msg.lower() in ["hi", "hello", "hey", "start"]:
             session["step"] = "ask_name"
             session["data"] = {}
@@ -126,6 +125,7 @@ async def receive_message(request: Request):
                 "What is your name?"
             )
 
+        # ── STEP 1: got name ──
         elif step == "ask_name":
             data_s["customer_name"] = msg
             barbers = get_barbers()
@@ -138,6 +138,7 @@ async def receive_message(request: Request):
                 f"Reply with a number (1, 2, or 3)"
             )
 
+        # ── STEP 2: got barber ──
         elif step == "ask_barber":
             barbers = data_s.get("barbers", [])
             try:
@@ -163,6 +164,7 @@ async def receive_message(request: Request):
             except (ValueError, IndexError):
                 await send_whatsapp(phone, f"Please reply with a number between 1 and {len(barbers)}")
 
+        # ── STEP 3: got date ──
         elif step == "ask_date":
             dates = data_s.get("dates", [])
             try:
@@ -188,6 +190,7 @@ async def receive_message(request: Request):
             except (ValueError, IndexError):
                 await send_whatsapp(phone, f"Please reply with a number between 1 and {len(dates)}")
 
+        # ── STEP 4: got slot ──
         elif step == "ask_slot":
             slots = data_s.get("slots", [])
             try:
