@@ -1,26 +1,38 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import barbers, bookings, slots
 from bot import router as bot_router
+from routers import barbers, bookings, slots
+import asyncio
+import scheduler as sched
 
-app = FastAPI(
-    title="Salon Booking API",
-    description="WhatsApp-based salon booking system",
-    version="1.0.0"
-)
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(barbers.router,  prefix="/api", tags=["Barbers"])
-app.include_router(slots.router,    prefix="/api", tags=["Slots"])
-app.include_router(bookings.router, prefix="/api", tags=["Bookings"])
-app.include_router(bot_router,      prefix="/bot", tags=["Bot"])
+app.include_router(bot_router, prefix="/bot")
+app.include_router(barbers.router, prefix="/barbers")
+app.include_router(bookings.router, prefix="/bookings")
+app.include_router(slots.router, prefix="/slots")
 
-@app.get("/", tags=["Health"])
-def root():
-    return {"message": "Salon Booking API is running", "docs": "/docs"}
+@app.get("/")
+def health():
+    return {"status": "StyleBook API is live"}
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(scheduler_loop())
+
+async def scheduler_loop():
+    while True:
+        try:
+            await sched.run_all()
+        except Exception as e:
+            print(f"Scheduler error: {e}")
+        await asyncio.sleep(3600)
+            
