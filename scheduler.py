@@ -6,7 +6,7 @@ from database import supabase
 SALON_ID = os.environ.get("VITE_SALON_ID", "11111111-1111-1111-1111-111111111111")
 WHATSAPP_PROVIDER = os.environ.get("WHATSAPP_PROVIDER", "green_api")
 
-# ── SEND MESSAGE ───────────────────────────────────
+# -- SEND MESSAGE -----------------------------------
 async def send_whatsapp(to: str, text: str, salon=None):
     if WHATSAPP_PROVIDER == "meta":
         await send_meta(to, text, salon)
@@ -44,7 +44,7 @@ async def send_meta(to: str, text: str, salon=None):
         except Exception as e:
             print(f"Meta scheduler send error: {e}")
 
-# ── GET ALL ACTIVE SALONS ──────────────────────────
+# -- GET ALL ACTIVE SALONS --------------------------
 def get_active_salons():
     try:
         result = supabase.table("salons").select("*").eq("is_active", True).execute()
@@ -52,7 +52,7 @@ def get_active_salons():
     except:
         return [{"id": SALON_ID, "whatsapp_instance_id": None, "whatsapp_token": None, "owner_phone": None}]
 
-# ── GET SETTINGS ───────────────────────────────────
+# -- GET SETTINGS -----------------------------------
 def get_settings(salon_id: str):
     try:
         result = supabase.table("salon_settings").select("*").eq("salon_id", salon_id).execute()
@@ -70,7 +70,7 @@ def get_settings(salon_id: str):
         "salon_name": "Style Hub Salon"
     }
 
-# ── TASK 1: 4HR CONFIRMATION MESSAGES ─────────────
+# -- TASK 1: 4HR CONFIRMATION MESSAGES -------------
 async def send_confirmation_messages():
     print(f"[Scheduler] Running confirmation check at {datetime.now()}")
     salons = get_active_salons()
@@ -110,7 +110,7 @@ async def send_confirmation_messages():
                     f"Barber: {barber_name}\n"
                     f"Time: {booking['slot_time']}\n"
                     f"Service: {booking.get('service_name', '')}\n\n"
-                    f"Aane wale hain? Cancel karne ke liye \"Cancel\" likho."
+                    f"Aane wale hain  Cancel karne ke liye \"Cancel\" likho."
                 )
 
                 await send_whatsapp(booking["customer_phone"], msg, salon)
@@ -120,7 +120,7 @@ async def send_confirmation_messages():
             except Exception as e:
                 print(f"Confirmation error for booking {booking.get('id')}: {e}")
 
-# ── TASK 2: GOOGLE REVIEW REQUESTS ────────────────
+# -- TASK 2: GOOGLE REVIEW REQUESTS ----------------
 async def send_review_requests():
     print(f"[Scheduler] Running review check at {datetime.now()}")
     salons = get_active_salons()
@@ -157,7 +157,7 @@ async def send_review_requests():
                     msg = (
                         f"Thank you for visiting {salon_name} today!\n\n"
                         f"Hume umeed hai aapko hamare service pasand aaye.\n"
-                        f"Kya aap 1 minute mein Google review de sakte hain? Isse hume bahut madad milegi.\n\n"
+                        f"Kya aap 1 minute mein Google review de sakte hain  Isse hume bahut madad milegi.\n\n"
                         f"Review link: {review_link}\n\n"
                         f"Shukriya!"
                     )
@@ -175,7 +175,7 @@ async def send_review_requests():
             except Exception as e:
                 print(f"Review error for booking {booking.get('id')}: {e}")
 
-# ── TASK 3: RE-ENGAGEMENT MESSAGES ────────────────
+# -- TASK 3: RE-ENGAGEMENT MESSAGES ----------------
 async def send_reengagement_messages():
     print(f"[Scheduler] Running re-engagement check at {datetime.now()}")
     salons = get_active_salons()
@@ -218,7 +218,7 @@ async def send_reengagement_messages():
                     f"{greeting}\n\n"
                     f"{salon_name} mein aapko miss kar rahe hain!\n"
                     f"Kaafi time ho gaya hai aapki last visit ko.\n\n"
-                    f"Kya aap apni next appointment book karna chahenge?\n"
+                    f"Kya aap apni next appointment book karna chahenge \n"
                     f"Sirf Hi bhejo - hum ready hain!"
                 )
 
@@ -228,7 +228,7 @@ async def send_reengagement_messages():
         except Exception as e:
             print(f"Re-engagement error: {e}")
 
-# ── TASK 4: MONTHLY REPORT TO YOU ─────────────────
+# -- TASK 4: MONTHLY REPORT TO YOU -----------------
 async def send_monthly_report():
     # Only runs on 1st of month at 9 AM
     now = datetime.now()
@@ -291,7 +291,7 @@ async def send_monthly_report():
     except Exception as e:
         print(f"Monthly report error: {e}")
 
-# ── MAIN RUNNER ────────────────────────────────────
+# -- MAIN RUNNER ------------------------------------
 async def run_all():
     await send_confirmation_messages()
     await send_review_requests()
@@ -301,4 +301,3 @@ async def run_all():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(run_all())
-              
